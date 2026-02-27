@@ -200,7 +200,11 @@ async function handleShortUI(request, env) {
 </head>
 <body>
   <h1>URL Shortened Successfully!</h1>
-  <p><strong>Short URL:</strong> <a href="${shortUrl}">${shortUrl}</a></p>
+  <p>
+    <strong>Short URL:</strong>
+    <button onclick="navigator.clipboard.writeText('${shortUrl}'); const btn = this; btn.innerText = 'Copied!'; setTimeout(() => btn.innerText = 'Copy', 2000);" style="margin-right: 8px; cursor: pointer;">Copy</button>
+    <a href="${shortUrl}">${shortUrl}</a>
+  </p>
   <p><strong>Original URL:</strong> ${originalUrl}</p>
   <p><a href="/short">Create another</a></p>
 </body>
