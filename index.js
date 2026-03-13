@@ -83,7 +83,7 @@ async function insertShortUrl(env, shortCode, originalUrl) {
 }
 
 async function getShortUrl(env, shortCode) {
-  const url = `${env.SUPABASE_URL}/rest/v1/short_urls?short_code=eq.${shortCode}&select=*`;
+  const url = `${env.SUPABASE_URL}/rest/v1/short_urls?short_code=eq.${encodeURIComponent(shortCode)}&select=*`;
   
   const response = await fetch(url, {
     headers: {
@@ -97,14 +97,34 @@ async function getShortUrl(env, shortCode) {
 }
 
 async function deleteShortUrl(env, shortCode) {
-  const url = `${env.SUPABASE_URL}/rest/v1/short_urls?short_code=eq.${shortCode}`;
+  const url = `${env.SUPABASE_URL}/rest/v1/short_urls?short_code=eq.${encodeURIComponent(shortCode)}`;
   
   const response = await fetch(url, {
     method: 'DELETE',
     headers: {
       'apikey': env.SUPABASE_KEY,
-      'Authorization': `Bearer ${env.SUPABASE_KEY}`
+      'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+      'Prefer': 'return=representation'
     }
+  });
+  
+  return response;
+}
+
+async function updateShortUrl(env, shortCode, originalUrl) {
+  const url = `${env.SUPABASE_URL}/rest/v1/short_urls?short_code=eq.${encodeURIComponent(shortCode)}`;
+  
+  const response = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      'apikey': env.SUPABASE_KEY,
+      'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation'
+    },
+    body: JSON.stringify({
+      original_url: originalUrl
+    })
   });
   
   return response;
@@ -142,32 +162,121 @@ async function handleShortUI(request, env) {
   // Handle POST request (form submission)
   if (request.method === 'POST') {
     const formData = await request.formData();
-    const originalUrl = formData.get('url');
-    const customCode = formData.get('custom_code');
-    
-    if (!originalUrl) {
-      return new Response('URL is required', { status: 400 });
-    }
-    
-    // Use custom code or generate random one, with retry logic for random codes
-    let shortCode = customCode || generateShortCode();
-    const maxRetries = 5;
-    let retries = 0;
+    const action = String(formData.get('action') || 'create').trim().toLowerCase();
+    const origin = new URL(request.url).origin;
     
     try {
-      let response;
+      if (action === 'delete') {
+        const deleteCode = String(formData.get('delete_code') || '').trim();
+        
+        if (!deleteCode) {
+          return new Response('Short code is required for delete.', { status: 400 });
+        }
+        
+        const existing = await getShortUrl(env, deleteCode);
+        if (!existing) {
+          return new Response(`Short code "${deleteCode}" not found.`, { status: 404 });
+        }
+        
+        const deleteResponse = await deleteShortUrl(env, deleteCode);
+        if (!deleteResponse.ok) {
+          const errorText = await deleteResponse.text();
+          return new Response(`Error deleting short URL: ${errorText}`, { status: 400 });
+        }
+        
+        const shortUrl = `${origin}/${deleteCode}`;
+        const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Short URL Deleted</title>
+</head>
+<body>
+  <h1>Short URL Deleted</h1>
+  <p><strong>Deleted:</strong> ${shortUrl}</p>
+  <p><a href="/short">Back to URL Manager</a></p>
+</body>
+</html>
+        `;
+        
+        return new Response(html, {
+          headers: { 'Content-Type': 'text/html' }
+        });
+      }
+      
+      if (action === 'update') {
+        const updateCode = String(formData.get('update_code') || '').trim();
+        const updatedUrl = String(formData.get('update_url') || '').trim();
+        
+        if (!updateCode || !updatedUrl) {
+          return new Response('Short code and new URL are required for update.', { status: 400 });
+        }
+        
+        const existing = await getShortUrl(env, updateCode);
+        if (!existing) {
+          return new Response(`Short code "${updateCode}" not found.`, { status: 404 });
+        }
+        
+        const updateResponse = await updateShortUrl(env, updateCode, updatedUrl);
+        if (!updateResponse.ok) {
+          const errorText = await updateResponse.text();
+          return new Response(`Error updating short URL: ${errorText}`, { status: 400 });
+        }
+        
+        const shortUrl = `${origin}/${updateCode}`;
+        const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Short URL Updated</title>
+</head>
+<body>
+  <h1>Short URL Updated</h1>
+  <p><strong>Short URL:</strong> <a href="${shortUrl}">${shortUrl}</a></p>
+  <p><strong>Previous URL:</strong> ${existing.original_url}</p>
+  <p><strong>New URL:</strong> ${updatedUrl}</p>
+  <p><a href="/short">Back to URL Manager</a></p>
+</body>
+</html>
+        `;
+        
+        return new Response(html, {
+          headers: { 'Content-Type': 'text/html' }
+        });
+      }
+      
+      if (action !== 'create') {
+        return new Response('Invalid form action.', { status: 400 });
+      }
+      
+      const originalUrl = String(formData.get('url') || '').trim();
+      const customCode = String(formData.get('custom_code') || '').trim();
+      
+      if (!originalUrl) {
+        return new Response('URL is required', { status: 400 });
+      }
+      
+      // Use custom code or generate random one, with retry logic for random codes
+      let shortCode = customCode || generateShortCode();
+      const maxRetries = 5;
+      let retries = 0;
+      let createResponse;
       
       // Retry loop for random codes (not custom codes)
       while (retries < maxRetries) {
-        response = await insertShortUrl(env, shortCode, originalUrl);
+        createResponse = await insertShortUrl(env, shortCode, originalUrl);
         
         // Success
-        if (response.ok) {
+        if (createResponse.ok) {
           break;
         }
         
         // Check if it's a duplicate error
-        const errorText = await response.text();
+        const errorText = await createResponse.text();
         const isDuplicate = errorText.includes('duplicate') || errorText.includes('unique');
         
         // If custom code and duplicate, show error (don't retry)
@@ -186,8 +295,7 @@ async function handleShortUI(request, env) {
         return new Response(`Error creating short URL: ${errorText}`, { status: 400 });
       }
       
-      const data = await response.json();
-      const shortUrl = `${new URL(request.url).origin}/${shortCode}`;
+      const shortUrl = `${origin}/${shortCode}`;
       
       // Success page
       const html = `
@@ -206,7 +314,7 @@ async function handleShortUI(request, env) {
     <a href="${shortUrl}">${shortUrl}</a>
   </p>
   <p><strong>Original URL:</strong> ${originalUrl}</p>
-  <p><a href="/short">Create another</a></p>
+  <p><a href="/short">Back to URL Manager</a></p>
 </body>
 </html>
       `;
@@ -227,11 +335,14 @@ async function handleShortUI(request, env) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Create Short URL</title>
+  <title>URL Manager</title>
 </head>
 <body>
-  <h1>URL Shortener</h1>
+  <h1>URL Shortener Manager</h1>
+  
+  <h2>Create</h2>
   <form method="POST">
+    <input type="hidden" name="action" value="create">
     <div>
       <label for="url">Original URL:</label><br>
       <input type="url" id="url" name="url" required size="50" placeholder="https://example.com">
@@ -244,6 +355,38 @@ async function handleShortUI(request, env) {
     <br>
     <button type="submit">Shorten URL</button>
   </form>
+  
+  <hr>
+  
+  <h2>Update</h2>
+  <form method="POST">
+    <input type="hidden" name="action" value="update">
+    <div>
+      <label for="update_code">Short Code:</label><br>
+      <input type="text" id="update_code" name="update_code" required size="20" placeholder="example: mylink">
+    </div>
+    <br>
+    <div>
+      <label for="update_url">New Original URL:</label><br>
+      <input type="url" id="update_url" name="update_url" required size="50" placeholder="https://example.com/new-page">
+    </div>
+    <br>
+    <button type="submit">Update URL</button>
+  </form>
+  
+  <hr>
+  
+  <h2>Delete</h2>
+  <form method="POST" onsubmit="return confirm('Delete this short URL?');">
+    <input type="hidden" name="action" value="delete">
+    <div>
+      <label for="delete_code">Short Code:</label><br>
+      <input type="text" id="delete_code" name="delete_code" required size="20" placeholder="example: mylink">
+    </div>
+    <br>
+    <button type="submit">Delete URL</button>
+  </form>
+  
   <br>
   <p><a href="/api-docs">View API Documentation</a></p>
 </body>
